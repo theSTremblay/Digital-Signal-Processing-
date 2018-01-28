@@ -1,1 +1,150 @@
 
+
+#include "DSP_Config.h" 
+#include "coeff.h"   // load the filter coefficients, B[n] ... extern
+#include <stdlib.h>  // needed to call the rand() function
+  
+
+#define LEFT  0
+#define RIGHT 1
+
+#define N 2
+#define M 1
+
+volatile union {
+	Uint32 UINT;
+	Int16 Channel[2];
+} CodecDataIn, CodecDataOut;
+
+
+/* add any global variables here */
+Int32 counter = 0;
+Int32 counterCarrier = 0;
+#define QPSK_SCALE 16000
+const Int32 samplesPerSymbol = 20;
+const float cosine[6] = {1, 0.5, -0.5, -1, -0.5, 0.5};
+const float sine[6] = {0, 0.8660254038, 0.8660254038, 0, -0.8660254038, -0.8660254038};
+
+float B1[N+1] = {1, 2, 1};
+float A1[N+1] = {1, -1.604130179275962, 0.670457905953174};
+float G1[M+1] = {0.016581931669303, 1};
+
+float x1[N+1] = {0, 0, 0};
+float y1[N+1] = {0, 0, 0};
+
+
+float Extract_Baseband(float cosine_component){
+		int i = 0;
+
+		x1[0] = cosine_component*G1[0];
+		y1[0] = 0;
+		for(i = 0; i < N + 1; i++){			// Compute feedforward terms
+			y1[0] += B1[i]*x1[i];
+		}
+
+		for(i = 1; i < N + 1; i++){			// Compute feedback terms
+			y1[0] -= A1[i]*y1[i];
+		}
+
+		for(i = N; i > 0; i--){				// Shift x and y values
+			y1[i] = y1[i-1];
+			x1[i] = x1[i-1];
+		}
+
+		float LPFOutput = y1[0]*G1[1];
+		return LPFOutput;
+}
+
+const float QPSK_LUT[4][2] = {
+// left (quadrature), right (in-phase)
+{     1 * QPSK_SCALE,  1 * QPSK_SCALE}, /* QPSK_LUT[0]  */
+{     1 * QPSK_SCALE, -1 * QPSK_SCALE}, /* QPSK_LUT[1]  */
+{    -1 * QPSK_SCALE,  1 * QPSK_SCALE}, /* QPSK_LUT[2]  */
+{    -1 * QPSK_SCALE, -1 * QPSK_SCALE}, /* QPSK_LUT[3]  */
+};
+
+float output_gain = 1.0;
+float xI[4];
+float xQ[4];
+float yI;
+float yQ;
+float output;
+
+
+interrupt void Codec_ISR()
+///////////////////////////////////////////////////////////////////////
+// Purpose:   Impulse modulated QPSK  
+//
+// Input:     None
+//
+// Returns:   Nothing
+//
+// Calls:     CheckForOverrun, ReadCodecData, WriteCodecData
+//
+// Notes:     None
+///////////////////////////////////////////////////////////////////////
+{                    
+	/* add any local variables here */
+	Int32 symbol;
+	Int32 i;
+
+ 	if(CheckForOverrun())					// overrun error occurred (i.e. halted DSP)
+		return;								// so serial port is reset to recover
+
+  	CodecDataIn.UINT = ReadCodecData();		// get input data samples
+	
+	/* add your code starting here */
+
+	// I added my impulse modulated QPSK routine here
+	if (counter == 0) {
+		symbol = rand() & 3; /* generate 2 random bits */
+		xI[0]  = QPSK_LUT[symbol][RIGHT];  
+		xQ[0]  = QPSK_LUT[symbol][ LEFT];   
+	}
+
+	// perform impulse modulation based on the FIR filter, B[N]
+	yI = 0;
+	yQ = 0;
+
+	for (i = 0; i < 4; i++) {
+		yI += xI[i]*B[counter + 20*i];	// perform the "I" dot-product
+		yQ += xQ[i]*B[counter + 20*i];	// perform the "Q" dot-product
+	}
+    
+	if (counter >= (samplesPerSymbol - 1)) {
+		counter = -1; 
+
+		/* shift xI[] and xQ[] in preparation to receive the next input */
+		for (i = 3; i > 0; i--) {
+			xI[i] = xI[i-1];  // setup xI[] for the next input value
+			xQ[i] = xQ[i-1];  // setup xQ[] for the next input value
+		}
+	}
+
+	counter++;
+
+	if(counterCarrier >= (23)) {
+		counterCarrier = -1;
+	}
+
+	counterCarrier++;
+
+	output = output_gain*(yI*cosine[(counterCarrier % 6) % 7] - yQ*sine[(counterCarrier % 6) % 7]);
+	
+	// Begin Receiver Code
+	//output = 2*output*cosine[(counterCarrier % 6) % 7];
+	//output = Extract_Baseband(output);
+
+	output = -2*output*sine[(counterCarrier % 6) % 7];
+	output = Extract_Baseband(output);
+
+
+	CodecDataOut.Channel[LEFT]  = output; // setup the LEFT  value	
+	CodecDataOut.Channel[RIGHT] = yQ; // setup the RIGHT value
+	// end of my impulse modulated QPSK routine
+
+	/* end your code here */
+
+	WriteCodecData(CodecDataOut.UINT);		// send output data to  port
+}
+
